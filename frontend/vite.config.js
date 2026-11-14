@@ -7,7 +7,6 @@ import AutoImport from 'unplugin-auto-import/vite'
 import Components from 'unplugin-vue-components/vite'
 import { NaiveUiResolver } from 'unplugin-vue-components/resolvers'
 import wasm from "vite-plugin-wasm";
-import topLevelAwait from "vite-plugin-top-level-await";
 
 // https://vitejs.dev/config/
 export default defineConfig({
@@ -17,13 +16,13 @@ export default defineConfig({
   plugins: [
     vue(),
     wasm(),
-    topLevelAwait(),
     AutoImport({
       imports: [
         'vue',
         {
           'naive-ui': [
             'useMessage',
+            'useNotification',
             'NButton',
             'NPopconfirm',
             'NIcon',
@@ -35,13 +34,16 @@ export default defineConfig({
       resolvers: [NaiveUiResolver()]
     }),
     VitePWA({
-      registerType: 'autoUpdate',
+      registerType: null,
       devOptions: {
-        enabled: true
+        enabled: false
       },
       workbox: {
         disableDevLogs: true,
-        globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
+        globPatterns: [],
+        runtimeCaching: [],
+        navigateFallback: null,
+        cleanupOutdatedCaches: true,
       },
       manifest: {
         name: 'Temp Email',
@@ -59,9 +61,12 @@ export default defineConfig({
     })
   ],
   resolve: {
-    alias: {
-      '@': fileURLToPath(new URL('./src', import.meta.url))
-    }
+    alias: [
+      {
+        find: '@',
+        replacement: fileURLToPath(new URL('./src', import.meta.url))
+      }
+    ]
   },
   define: {
     'import.meta.env.PACKAGE_VERSION': JSON.stringify(process.env.npm_package_version),

@@ -1,19 +1,79 @@
 
 # 配置发送邮件
 
-## 使用 Cloudflare Workers 给已认证的邮箱发送邮件
+收件功能无需配置发信通道；如需从本项目发送邮件，则必须至少配置以下一种方式。三种方式可以同时启用，系统会按下一节的优先级为每次请求选择通道。
 
-admin 后台 账号配置 `已验证地址列表(可通过 cf 内部 api 发送邮件)`
+| 方式 | 适合场景 | 必要配置 | 特点 |
+|------|----------|----------|------|
+| Cloudflare `send_email` binding | 已使用 Cloudflare Email Service，希望减少第三方依赖 | `SEND_MAIL` binding，并在 Email Service 接入发信域名；非空的 `SEND_MAIL_DOMAINS` 仅限制兜底通道使用的发信域名 | 与 Worker 集成最直接；任意收件人发信要求 Workers Paid |
+| Resend API | 希望快速接入托管发信服务 | `RESEND_TOKEN` 或域名专用的 `RESEND_TOKEN_<DOMAIN>`，并在 Resend 验证发信域名 | 配置简单；额度和限制由 Resend 套餐决定 |
+| SMTP | 已有 SMTP 服务，或需要自行控制发信基础设施 | `SMTP_CONFIG` | 自定义能力最强；需要自行维护服务、凭据和连通性 |
 
-## 使用 resend 发送邮件
+::: tip 推荐方案
+推荐使用 Cloudflare `send_email` binding 作为默认发信通道。Workers Paid 用户绑定 `SEND_MAIL` 并在 Email Service 完成发信域名接入后，允许的发信域名即可向任意外部地址发信。仅使用 Email Routing 时，只能免费发往账户中已验证的目标地址。
+
+Workers Paid 每月含 3,000 封，超出部分 $0.35 / 1000 封。
+:::
+
+## 发信通道优先级
+
+每次 `/api/send_mail` 请求按如下顺序匹配通道，**命中即发送**：
+
+| 顺序 | 条件 | 通道 | 扣 balance |
+|------|------|------|-----------|
+| 1 | `SEND_MAIL` 已绑定 **且** 收件人在 `verifiedAddressList` | Cloudflare binding（兼容模式） | 否 |
+| 2 | `RESEND_TOKEN` 或 `RESEND_TOKEN_<DOMAIN>` 已配置 | Resend API | 是 |
+| 3 | `SMTP_CONFIG` 含当前域名配置 | worker-mailer SMTP | 是 |
+| 4 | `SEND_MAIL` 已绑定，且发信域名在 `SEND_MAIL_DOMAINS` 中，或该列表未配置/为空（以上均未命中） | **Cloudflare binding（推荐主通道）** | 是 |
+| — | 以上均未命中 | 抛错 | — |
+
+> [!NOTE]
+> binding 发信失败会直接报错。
+
+## 使用 Cloudflare `send_email` binding（推荐）
+
+仅 CLI 部署时使用，在 `wrangler.toml` 中添加：
+
+```toml
+# 通过 Cloudflare send_email binding 发送邮件
+send_email = [
+   { name = "SEND_MAIL" },
+]
+```
+
+> [!warning] 重要
+> 绑定名必须为 `SEND_MAIL`，与 Cloudflare 官方文档示例中的 `SEND_EMAIL` 不同。
+
+完成下列步骤后即可直接向任意外部地址发信：
+
+1. 在 Cloudflare Dashboard 的 Email Service 中接入对应发信域名（任意收件人发信要求 Workers Paid）
+2. `wrangler.toml` 添加上述 `send_email` 绑定
+3. 部署 Worker
+
+默认无需配置额外的 env var。如需限制兜底通道，请将 `SEND_MAIL_DOMAINS` 配置为合法 JSON 数组，例如 `["example.com"]`。非空数组只允许列表中的发信域名；不设置或配置为空数组时允许所有域名。无效 JSON 会被解析为空列表，因而同样允许所有域名，请勿填写 `example.com` 这类裸值。
+
+## 使用 Resend 发送邮件
 
 注册 `https://resend.com/domains` 根据提示添加 DNS 记录,
 
+> [!WARNING] Cloudflare 上 DNS 记录的代理状态
+> Resend 域名验证的 CNAME 记录**必须设置为 仅 DNS**（灰云），在
+> Cloudflare DNS 控制面板中代理（橙云）记录会阻止 Resend
+> 完成验证，且一次失败的尝试可能需要数小时才能重试。
+> 参见 [#515](https://github.com/dreamhunter2333/cloudflare_temp_email/issues/515)。
+
 `API KEYS` 页面创建 `api key`
 
-使用 cli 或者直接添加到 `wrangler.toml` 的 `vars`，或者在 cloudflare worker 页面的变量中添加 `RESEND_TOKEN`
+然后执行下面的命令，将 `RESEND_TOKEN` 添加到 secrets 中
+
+> [!NOTE]
+> 如果你觉得麻烦，也可以直接明文放在 `wrangler.toml` 中 `[vars]` 下面，但是不推荐这样做
+
+如果你是通过 UI 部署的，可以在 Cloudflare 的 UI 界面中添加到 `Variables and Secrets` 下面
 
 ```bash
+# 切换到 worker 目录
+cd worker
 wrangler secret put RESEND_TOKEN
 ```
 
@@ -24,18 +84,122 @@ wrangler secret put RESEND_TOKEN_XXX_COM
 wrangler secret put RESEND_TOKEN_DREAMHUNTER2333_XYZ
 ```
 
-## 使用 mailchannels 发送邮件
+## 使用 SMTP 发送邮件
 
-::: warning
-[Mail Channels 免费电子邮件发送 API 将于2024年6月30日结束](https://support.mailchannels.com/hc/en-us/articles/26814255454093-End-of-Life-Notice-Cloudflare-Workers)
-:::
+`SMTP_CONFIG` 的格式如下，**key 必须是你自己的发信域名**，value 为 SMTP 配置。
 
-1. 找到域名 `DNS` 记录的 `TXT` 的 `SPF` 记录, 增加 `include:relay.mailchannels.net`
+SMTP 配置格式详情可以参考 [zou-yu/worker-mailer](https://github.com/zou-yu/worker-mailer/blob/main/README_zh-CN.md)
 
-    `v=spf1 include:_spf.mx.cloudflare.net include:relay.mailchannels.net ~all`
+> [!warning] 重要
+> JSON 中的 key（如下面示例中的 `your-domain.com`）必须替换为**你自己的域名**，即 `DOMAINS` 变量中配置的域名。
+> 这是最常见的配置错误之一，请勿直接复制示例中的域名。
 
-2. 新建 `_mailchannels` 记录, 类型为 `TXT`, 内容为 `v=mc1 cfid=你的worker域名`
+```json
+{
+    "your-domain.com": {
+        "host": "smtp.example.com",
+        "port": 465,
+        "secure": true,
+        "authType": [
+            "plain",
+            "login"
+        ],
+        "credentials": {
+            "username": "your-smtp-username",
+            "password": "your-smtp-password"
+        }
+    }
+}
+```
 
-- 此处 worker 域名为后端 api 的域名，比如我部署在 `https://temp-email-api.awsl.uk/`，则填写 `v=mc1 cfid=awsl.uk`
+**字段说明：**
 
-- 如果你的域名是 `https://temp-email-api.xxx.workers.dev`，则填写 `v=mc1 cfid=xxx.workers.dev`
+| 字段 | 说明 |
+|------|------|
+| key（如 `your-domain.com`） | 你的发信域名，必须与 `DOMAINS` 中配置的域名一致 |
+| `host` | SMTP 服务器地址，如 `smtp.mailgun.org`、`smtp.gmail.com` 或你自建的 SMTP 服务器地址 |
+| `port` | SMTP 端口，通常 `465`（SSL）或 `587`（STARTTLS） |
+| `secure` | 是否使用 SSL/TLS，端口 465 时设为 `true`，端口 587 时设为 `false` |
+| `authType` | 认证方式，一般使用 `["plain", "login"]` |
+| `credentials.username` | SMTP 服务器的登录用户名 |
+| `credentials.password` | SMTP 服务器的登录密码 |
+
+如果你有**多个域名**使用不同的 SMTP 服务，在同一个 JSON 中添加多个 key 即可：
+
+```json
+{
+    "domain-a.com": {
+        "host": "smtp.mailgun.org",
+        "port": 465,
+        "secure": true,
+        "authType": ["plain", "login"],
+        "credentials": { "username": "user@domain-a.com", "password": "xxx" }
+    },
+    "domain-b.com": {
+        "host": "smtp.gmail.com",
+        "port": 465,
+        "secure": true,
+        "authType": ["plain", "login"],
+        "credentials": { "username": "user@gmail.com", "password": "app-password" }
+    }
+}
+```
+
+然后执行下面的命令，将 `SMTP_CONFIG` 添加到 secrets 中
+
+> [!NOTE]
+> 如果你觉得麻烦，也可以直接明文放在 `wrangler.toml` 中 `[vars]` 下面，但是不推荐这样做
+
+如果你是通过 UI 部署的，可以在 Cloudflare 的 UI 界面中添加到 `Variables and Secrets` 下面
+
+```bash
+# 切换到 worker 目录
+cd worker
+wrangler secret put SMTP_CONFIG
+```
+
+## 用户账号、邮箱、邮箱地址与发信权限
+
+这些概念相互关联，但不是同一个对象：
+
+| 概念 | 说明 |
+|------|------|
+| 用户账号 | 用于登录用户中心，可绑定和管理多个邮箱；用户账号的用户邮箱本身不等于用于收发信的邮箱地址 |
+| 邮箱 | 包含收件箱、发件箱、发信能力和邮箱设置的业务对象 |
+| 邮箱地址 | 标识邮箱的具体值，例如 `name@example.com`；当前邮箱由该地址的 Address JWT 认证 |
+| 发信权限与额度 | `address_sender` 中的权限和额度以**邮箱地址**为单位独立管理；`NO_LIMIT_SEND_ROLE` 配置的用户角色可以绕过地址额度检查 |
+
+因此，同一用户账号绑定的多个邮箱地址不会共享发信权限或余额。为某个地址申请发信权限时：
+
+1. 先在前端切换到需要发信的邮箱
+2. 打开「发送邮件」页
+3. 点击「申请权限」
+
+申请只作用于当时选中的邮箱地址。切换到另一个地址后，需要查看该地址自己的额度，并在需要时单独申请。邮箱地址不必绑定用户账号也可以独立持有发信权限。
+
+## 发信余额机制
+
+邮箱地址发送邮件需要有该地址的发信余额。余额机制如下：
+
+1. **自动初始化默认额度**：当 `DEFAULT_SEND_BALANCE > 0` 时，用户打开前端发信页或第一次调用发信接口时，系统会自动为该地址初始化默认额度
+2. **手动申请**：如果 `DEFAULT_SEND_BALANCE = 0`，使用者可以在前端切换到目标邮箱地址并点击「申请权限」，为当前地址创建待管理员处理的发信权限记录
+3. **无限制发送**：以下方式可以跳过余额检查：
+   - 在管理后台将邮箱地址加入「无限制发送地址列表」
+   - 配置 `NO_LIMIT_SEND_ROLE` 环境变量，指定可以无限发送的用户角色
+
+> [!NOTE]
+> `DEFAULT_SEND_BALANCE` 仅在地址尚无 `address_sender` 记录时自动插入初始额度（`ON CONFLICT DO NOTHING`），已有记录（包括管理员禁用或手动设置的行）一律保持原样，runtime 不会修改；历史异常或被禁用的地址需由管理员在后台手动启用并设置余额。
+>
+> 第 1 层 `verifiedAddressList` 命中时不扣余额，但同样计入发信额度；第 2/3/4 层统一扣 balance。
+>
+> 发信额度对**全部**发信渠道生效，admin 发信接口也会一起计入。
+>
+> 每日和每月额度按 **UTC** 时间窗口计算。
+>
+> 当前额度实现属于 **soft guard**，适合日常额度控制；在数据库异常或高并发场景下，它不适合作为绝对严格的成本硬闸。
+
+## 给 Cloudflare 上已认证的转发邮箱发送邮件
+
+适合未完成 Email Routing onboarding 的域名，或 Workers 免费版。
+
+只有收件人在管理后台的 `已验证地址列表` 中时，才会通过 `SEND_MAIL` binding 发信。

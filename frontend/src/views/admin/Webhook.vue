@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { useI18n } from 'vue-i18n'
+import { useScopedI18n } from '@/i18n/app'
 
 // @ts-ignore
 import { useGlobalState } from '../../store'
@@ -9,37 +9,29 @@ import { api } from '../../api'
 // @ts-ignore
 const message = useMessage()
 
-const { t } = useI18n({
-    messages: {
-        en: {
-            successTip: 'Success',
-            webhookAllowList: 'Webhook Allow List(Enter the address that is allowed to use webhook)',
-            save: 'Save',
-        },
-        zh: {
-            successTip: '成功',
-            webhookAllowList: 'Webhook 白名单(请输入允许使用webhook 的地址)',
-            save: '保存',
-        }
-    }
-});
+const { t } = useScopedI18n('views.admin.Webhook')
 
 class WebhookSettings {
+    enableAllowList: boolean;
     allowList: string[];
 
-    constructor(allowList: string[]) {
+    constructor(enableAllowList: boolean, allowList: string[]) {
+        this.enableAllowList = enableAllowList;
         this.allowList = allowList;
     }
 }
 
-const webhookSettings = ref(new WebhookSettings([]))
+const webhookSettings = ref(new WebhookSettings(false, []))
+const webhookEnabled = ref(false)
+const errorInfo = ref('')
 
 const getSettings = async () => {
     try {
         const res = await api.fetch(`/admin/webhook/settings`)
         Object.assign(webhookSettings.value, res)
+        webhookEnabled.value = true
     } catch (error) {
-        message.error((error as Error).message || "error");
+        errorInfo.value = (error as Error).message || "error";
     }
 }
 
@@ -62,15 +54,27 @@ onMounted(async () => {
 
 <template>
     <div class="center">
-        <n-card style="max-width: 800px; overflow: auto;">
+        <n-card v-if="webhookEnabled" :bordered="false" embedded style="max-width: 800px; overflow: auto;">
+            <n-flex justify="end">
+                <n-button @click="saveSettings" type="primary">
+                    {{ t('save') }}
+                </n-button>
+            </n-flex>
+            <n-form-item-row :label="t('enableAllowList')">
+                <n-switch v-model:value="webhookSettings.enableAllowList" :round="false" />
+            </n-form-item-row>
             <n-form-item-row :label="t('webhookAllowList')">
                 <n-select v-model:value="webhookSettings.allowList" filterable multiple tag
-                    :placeholder="t('webhookAllowList')" />
+                    :placeholder="t('webhookAllowList')">
+                    <template #empty>
+                        <n-text depth="3">
+                            {{ t('manualInputPrompt') }}
+                        </n-text>
+                    </template>
+                </n-select>
             </n-form-item-row>
-            <n-button @click="saveSettings" type="primary" block>
-                {{ t('save') }}
-            </n-button>
         </n-card>
+        <n-result v-else status="404" :title="t('notEnabled')" :description="errorInfo" />
     </div>
 </template>
 

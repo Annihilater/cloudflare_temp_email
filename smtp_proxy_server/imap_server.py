@@ -1,227 +1,177 @@
 import json
 import logging
-import httpx
 
-from io import BytesIO
+import httpx
 from twisted.mail import imap4
 from zope.interface import implementer
 from twisted.cred.portal import Portal, IRealm
-from twisted.internet import protocol, reactor, defer
+from twisted.internet import protocol, reactor, defer, ssl, threads
+from twisted.cred import error as cred_error
 from twisted.cred.checkers import ICredentialsChecker, IUsernamePassword
 
 from config import settings
-from parse_email import generate_email_model, parse_email
-from models import EmailModel
+from imap_http_client import BackendClient
+from imap_mailbox import SimpleMailbox
 
 _logger = logging.getLogger(__name__)
-_logger.setLevel(logging.INFO)
-
-
-@implementer(imap4.IMessage)
-class SimpleMessage:
-
-    def __init__(self, uid=None, email_model: EmailModel = None):
-        self.uid = uid
-        self.email = email_model
-        self.subparts = self.email.subparts
-
-    def getUID(self):
-        return self.uid
-
-    def getHeaders(self, negate, *names):
-        self.got_headers = negate, names
-        return {
-            k.lower(): v
-            for k, v in self.email.headers.items()
-        }
-
-    def isMultipart(self):
-        return len(self.subparts) > 0
-
-    def getSubPart(self, part):
-        self.got_subpart = part
-        return SimpleMessage(email_model=self.subparts[part])
-
-    def getBodyFile(self):
-        return BytesIO(self.email.body.encode("utf-8"))
-
-    def getSize(self):
-        return self.email.size
-
-    def getFlags(self):
-        return ["\\Seen"]
-
-    def getInternalDate(self):
-        return self.email.headers.get("Date", "Mon, 1 Jan 1900 00:00:00 +0000")
-
-
-@implementer(imap4.IMailboxInfo, imap4.IMailbox)
-class SimpleMailbox:
-
-    def __init__(self, name, password):
-        self.name = name
-        self.password = password
-        self.listeners = []
-        self.addListener = self.listeners.append
-        self.removeListener = self.listeners.remove
-        self.message_count = 0
-
-    def getFlags(self):
-        return ["\\Seen"]
-
-    def getUIDValidity(self):
-        return 0
-
-    def getMessageCount(self):
-        return self.message_count or 1000
-
-    def getRecentCount(self):
-        return 0
-
-    def getUnseenCount(self):
-        return 0
-
-    def isWriteable(self):
-        return 0
-
-    def destroy(self):
-        pass
-
-    def getHierarchicalDelimiter(self):
-        return "/"
-
-    def requestStatus(self, names):
-        r = {}
-        if "MESSAGES" in names:
-            r["MESSAGES"] = self.getMessageCount()
-        if "RECENT" in names:
-            r["RECENT"] = self.getRecentCount()
-        if "UIDNEXT" in names:
-            r["UIDNEXT"] = self.getMessageCount() + 1
-        if "UIDVALIDITY" in names:
-            r["UIDVALIDITY"] = self.getUIDValidity()
-        if "UNSEEN" in names:
-            r["UNSEEN"] = self.getUnseenCount()
-        return defer.succeed(r)
-
-    def fetch(self, messages, uid):
-        if self.name == "INBOX":
-            return self.fetchINBOX(messages)
-        if self.name == "SENT":
-            return self.fetchSENT(messages)
-        return []
-
-    def fetchINBOX(self, messages):
-        start, end = messages.ranges[0]
-        start = max(start, 1)
-        limit = min(20, end - start + 1) if end and end >= start else 20
-        if self.message_count > 0 and start > self.message_count:
-            return []
-        res = httpx.get(
-            f"{settings.proxy_url}/api/mails?limit={limit}&offset={start - 1}",
-            headers={
-                "Authorization": f"Bearer {self.password}",
-                "Content-Type": "application/json"
-            }
-        )
-        if res.status_code != 200:
-            _logger.error(
-                "Failed: "
-                f"code=[{res.status_code}] text=[{res.text}]"
-            )
-            raise Exception("Failed to fetch emails")
-        if res.json()["count"] > 0:
-            self.message_count = res.json()["count"]
-        return [
-            (start + uid, SimpleMessage(start + uid, parse_email(item["raw"])))
-            for uid, item in enumerate(reversed(res.json()["results"]))
-        ]
-
-    def fetchSENT(self, messages):
-        start, end = messages.ranges[0]
-        start = max(start, 1)
-        limit = min(20, end - start + 1) if end and end >= start else 20
-        if self.message_count > 0 and start > self.message_count:
-            return []
-        res = httpx.get(
-            f"{settings.proxy_url}/api/sendbox?limit={limit}&offset={start - 1}",
-            headers={
-                "Authorization": f"Bearer {self.password}",
-                "Content-Type": "application/json"
-            }
-        )
-        if res.status_code != 200:
-            _logger.error(
-                "Failed: "
-                f"code=[{res.status_code}] text=[{res.text}]"
-            )
-            raise Exception("Failed to fetch emails")
-        if res.json()["count"] > 0:
-            self.message_count = res.json()["count"]
-        return [
-            (start + uid, SimpleMessage(start + uid, generate_email_model(item)))
-            for uid, item in enumerate(reversed(res.json()["results"]))
-        ]
-
-    def getUID(self, message):
-        return message.uid
-
-    def store(self, messages, flags, mode, uid):
-        # IMailboxIMAP.store
-        raise NotImplementedError
-
-
-class Account(imap4.MemoryAccount):
-
-    def __init__(self, user, password):
-        self.password = password
-        super().__init__(user)
-
-    def isSubscribed(self, name):
-        return name.upper() in ["INBOX", "SENT"]
-
-    def _emptyMailbox(self, name, id):
-        _logger.info(f"New mailbox: {name}, {id}")
-        if name == "INBOX":
-            return SimpleMailbox(name, self.password)
-        if name == "SENT":
-            return SimpleMailbox(name, self.password)
-        raise imap4.NoSuchMailbox(name.encode("utf-8"))
-
-    def select(self, name, rw=1):
-        return imap4.MemoryAccount.select(self, name)
+_logger.setLevel(logging.DEBUG)
+logging.basicConfig(level=logging.DEBUG)
 
 
 class SimpleIMAPServer(imap4.IMAP4Server):
-    def __init__(self, factory):
-        imap4.IMAP4Server.__init__(self)
-        self.factory = factory
+    def __init__(self, context_factory=None):
+        chal = {
+            b"LOGIN": imap4.LOGINCredentials,
+            b"PLAIN": imap4.PLAINCredentials,
+        }
+        imap4.IMAP4Server.__init__(
+            self, chal=chal, contextFactory=context_factory
+        )
 
     def lineReceived(self, line):
-        # _logger.info(f"Received: {line}")
-        super().lineReceived(line)
+        _logger.debug("C: %s", line)
+        return imap4.IMAP4Server.lineReceived(self, line)
 
     def sendLine(self, line):
-        # _logger.info(f"Sent: {line}")
-        super().sendLine(line)
+        _logger.debug("S: %s", line)
+        return imap4.IMAP4Server.sendLine(self, line)
+
+    def connectionMade(self):
+        """Wrap transport to log raw data sent to client."""
+        imap4.IMAP4Server.connectionMade(self)
+        real_write_seq = self.transport.writeSequence
+        def logging_write_seq(data):
+            joined = b''.join(data)
+            for line in joined.split(b'\r\n'):
+                if line:
+                    _logger.debug("S-RAW: %s", line[:300])
+            return real_write_seq(data)
+        self.transport.writeSequence = logging_write_seq
+
+    @staticmethod
+    def _fetch_implies_seen(query):
+        """Whether a FETCH query marks the messages it returns as read.
+
+        Per RFC 3501, ``BODY[...]`` sets ``\\Seen`` while ``BODY.PEEK[...]``
+        does not. ``RFC822`` and ``RFC822.TEXT`` are defined as equivalents of
+        ``BODY[]`` / ``BODY[TEXT]`` and so also set it; ``RFC822.HEADER`` is
+        equivalent to ``BODY.PEEK[HEADER]`` and does not.
+        """
+        for part in query:
+            part_type = getattr(part, "type", None)
+            if part_type == "body" and not getattr(part, "peek", False):
+                return True
+            if part_type in ("rfc822", "rfc822text"):
+                return True
+        return False
+
+    def do_FETCH(self, tag, messages, query, uid=0):
+        """Set ``\\Seen`` for non-peek fetches before delivering the response.
+
+        Twisted hands the parsed query to its own response builder and never
+        passes it to the mailbox, so the mailbox alone cannot tell a ``BODY[]``
+        from a ``BODY.PEEK[]``. Flag the messages here, before the FETCH
+        response is generated, so the flags the client receives are current.
+        """
+        if not query or not self._fetch_implies_seen(query):
+            return imap4.IMAP4Server.do_FETCH(self, tag, messages, query, uid)
+
+        def _fetch(_):
+            return imap4.IMAP4Server.do_FETCH(self, tag, messages, query, uid)
+
+        def _store_failed(failure):
+            # A failure to persist \Seen must not cost the client its mail.
+            _logger.warning("FETCH: could not set \\Seen: %s", failure.value)
+            return None
+
+        d = defer.maybeDeferred(
+            self.mbox.store, messages, ["\\Seen"], 1, uid
+        )
+        d.addErrback(_store_failed)
+        d.addCallback(_fetch)
+        return d
+
+    def _cbSelectWork(self, mbox, cmdName, tag):
+        """Override to add UIDNEXT in SELECT response (RFC 3501)."""
+        if mbox is None:
+            self.sendNegativeResponse(tag, b"No such mailbox")
+            return
+        if "\\noselect" in [s.lower() for s in mbox.getFlags()]:
+            self.sendNegativeResponse(tag, "Mailbox cannot be selected")
+            return
+
+        flags = [imap4.networkString(flag) for flag in mbox.getFlags()]
+        self.sendUntaggedResponse(b"%d EXISTS" % (mbox.getMessageCount(),))
+        self.sendUntaggedResponse(b"%d RECENT" % (mbox.getRecentCount(),))
+        self.sendUntaggedResponse(b"FLAGS (" + b" ".join(flags) + b")")
+        self.sendPositiveResponse(
+            None, b"[UIDVALIDITY %d]" % (mbox.getUIDValidity(),)
+        )
+        self.sendPositiveResponse(
+            None, b"[UIDNEXT %d]" % (mbox.getUIDNext(),)
+        )
+
+        s = mbox.isWriteable() and b"READ-WRITE" or b"READ-ONLY"
+        mbox.addListener(self)
+        self.sendPositiveResponse(
+            tag, b"[" + s + b"] " + cmdName + b" successful"
+        )
+        self.state = "select"
+        self.mbox = mbox
+
+
+class Account(imap4.MemoryAccount):
+    """Custom account that initializes mailbox UID index on select."""
+
+    def _emptyMailbox(self, name, id):
+        """Return a dummy mailbox for CREATE requests (e.g. Gmail creating Drafts)."""
+        _logger.debug("Accepting CREATE request for %s", name)
+        return SimpleMailbox(name, self._client, self.name)
+
+    def create(self, pathspec):
+        """Accept CREATE silently without actually creating mailboxes."""
+        _logger.debug("Ignoring CREATE for %s", pathspec)
+        return True
+
+    def listMailboxes(self, ref, wildcard):
+        """Only list INBOX and SENT, ignore client-created mailboxes."""
+        return [("INBOX", self.mailboxes["INBOX"]), ("SENT", self.mailboxes["SENT"])]
+
+    @defer.inlineCallbacks
+    def select(self, name, readwrite=1):
+        mbox = self.mailboxes.get(imap4._parseMbox(name.upper()))
+        if mbox is not None:
+            yield mbox._build_uid_index()
+        return mbox
 
 
 @implementer(IRealm)
 class SimpleRealm:
     def requestAvatar(self, avatarId, mind, *interfaces):
         res = json.loads(avatarId)
-        account = Account(res["username"], res["password"])
-        account.addMailbox("INBOX")
-        account.addMailbox("SENT")
-        return imap4.IAccount, account, lambda: None
+        username = res["username"]
+        password = res["password"]
+
+        client = BackendClient(password)
+
+        inbox = SimpleMailbox("INBOX", client, username)
+        sent = SimpleMailbox("SENT", client, username)
+
+        account = Account(username)
+        account._client = client
+        account.mailboxes = {"INBOX": inbox, "SENT": sent}
+        account.subscriptions = ["INBOX", "SENT"]
+
+        return imap4.IAccount, account, lambda: client.close()
 
 
 class IMAPFactory(protocol.Factory):
-    def __init__(self, portal):
+    def __init__(self, portal, context_factory=None):
         self.portal = portal
+        self._context_factory = context_factory
 
     def buildProtocol(self, addr):
-        p = SimpleIMAPServer(self)
+        p = SimpleIMAPServer(context_factory=self._context_factory)
         p.portal = self.portal
         return p
 
@@ -230,20 +180,77 @@ class IMAPFactory(protocol.Factory):
 class CustomChecker:
     credentialInterfaces = (IUsernamePassword,)
 
+    @staticmethod
+    def _is_jwt(token: str) -> bool:
+        """Check if token looks like a JWT (eyJ... with 3 dot-separated parts)."""
+        parts = token.split(".")
+        return len(parts) == 3 and parts[0].startswith("eyJ")
+
     def requestAvatarId(self, credentials):
-        return defer.succeed(json.dumps({
-            "username": credentials.username.decode(),
-            "password": credentials.password.decode(),
-        }))
+        username = credentials.username.decode()
+        password = credentials.password.decode()
+
+        if self._is_jwt(password):
+            _logger.info("Login via JWT token")
+            return defer.succeed(json.dumps({
+                "username": username,
+                "password": password,
+            }))
+
+        # Not a JWT — try address+password login via backend
+        _logger.info("Login via address+password")
+        d = threads.deferToThread(self._login_with_password, username, password)
+        return d
+
+    @staticmethod
+    def _login_with_password(username: str, password: str) -> str:
+        """Exchange address+password for a JWT via backend."""
+        res = httpx.post(
+            f"{settings.proxy_url}/api/address_login",
+            json={"email": username, "password": password},
+            headers={
+                "x-custom-auth": settings.basic_password,
+                "Content-Type": "application/json",
+            },
+            timeout=settings.imap_http_timeout,
+        )
+        if res.status_code == 200:
+            jwt = res.json().get("jwt")
+            if jwt:
+                return json.dumps({
+                    "username": username,
+                    "password": jwt,
+                })
+        raise cred_error.UnauthorizedLogin(f"address_login failed: {res.status_code}")
 
 
 def start_imap_server():
-    _logger.info(f"Starting IMAP server on port {settings.imap_port}")
+    _logger.info("Starting IMAP server on port %s", settings.imap_port)
+
+    context_factory = None
+    has_cert = bool(settings.imap_tls_cert)
+    has_key = bool(settings.imap_tls_key)
+    if has_cert != has_key:
+        raise ValueError(
+            "Both imap_tls_cert and imap_tls_key must be set together"
+        )
+    if has_cert and has_key:
+        _logger.info("TLS enabled for IMAP (STARTTLS)")
+        context_factory = ssl.DefaultOpenSSLContextFactory(
+            settings.imap_tls_key,
+            settings.imap_tls_cert,
+        )
+
     portal = Portal(SimpleRealm(), [CustomChecker()])
-    reactor.listenTCP(settings.imap_port, IMAPFactory(portal))
+    factory = IMAPFactory(portal, context_factory=context_factory)
+    reactor.listenTCP(settings.imap_port, factory)
     reactor.run()
 
 
 if __name__ == "__main__":
-    _logger.info(f"Starting server settings[{settings}]")
+    _logger.info(
+        "Starting IMAP server proxy_url=%s port=%s tls=%s",
+        settings.proxy_url, settings.imap_port,
+        bool(settings.imap_tls_cert and settings.imap_tls_key),
+    )
     start_imap_server()

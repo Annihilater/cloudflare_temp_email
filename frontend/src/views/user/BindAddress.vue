@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted, ref } from 'vue'
-import { useI18n } from 'vue-i18n'
+import { useScopedI18n } from '@/i18n/app'
 import { useRouter } from 'vue-router'
 
 import { useGlobalState } from '../../store'
@@ -8,16 +8,7 @@ import Login from '../common/Login.vue'
 
 const { userJwt, userSettings, } = useGlobalState()
 
-const { t } = useI18n({
-    messages: {
-        en: {
-            logout: 'Logout',
-        },
-        zh: {
-            logout: '退出登录',
-        }
-    }
-});
+const { t } = useScopedI18n('views.user.BindAddress')
 
 const fetchData = async () => {
 }
@@ -29,7 +20,7 @@ onMounted(async () => {
 
 <template>
     <div class="center" v-if="userSettings.user_email">
-        <n-card style="max-width: 600px;">
+        <n-card :bordered="false" embedded style="max-width: 600px;">
             <Login />
         </n-card>
     </div>

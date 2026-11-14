@@ -1,3 +1,5 @@
+import { getPathWithLocale } from '../i18n/utils'
+
 export const hashPassword = async (password: string) => {
     // user crypto to hash password
     const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(password));
@@ -6,8 +8,31 @@ export const hashPassword = async (password: string) => {
 }
 
 export const getRouterPathWithLang = (path: string, lang: string) => {
-    if (!lang || lang === 'zh') {
-        return path;
+    const normalizedLang = lang === 'en'
+        || lang === 'es'
+        || lang === 'pt-BR'
+        || lang === 'ja'
+        || lang === 'de'
+        ? lang
+        : 'zh';
+
+    return getPathWithLocale(path, normalizedLang);
+}
+
+export const utcToLocalDate = (utcDate: string | null | undefined, useUTCDate: boolean) => {
+    if (!utcDate) return '';
+    const utcDateString = `${utcDate} UTC`;
+    if (useUTCDate) {
+        return utcDateString;
     }
-    return `/${lang}${path}`;
+    try {
+        const date = new Date(utcDateString);
+        // if invalid date string
+        if (isNaN(date.getTime())) return utcDateString;
+
+        return date.toLocaleString();
+    } catch (e) {
+        console.error(e);
+    }
+    return utcDateString;
 }

@@ -1,23 +1,13 @@
 <script setup>
 import { ref, h, onMounted } from 'vue';
-import { useI18n } from 'vue-i18n'
+import { useScopedI18n } from '@/i18n/app'
 
 import { api } from '../../api'
+import { NPopconfirm } from 'naive-ui';
 
 const message = useMessage()
 
-const { t } = useI18n({
-    messages: {
-        en: {
-            download: 'Download',
-            action: 'Action',
-        },
-        zh: {
-            download: '下载',
-            action: '操作',
-        }
-    }
-});
+const { t } = useScopedI18n('views.index.Attachment')
 const data = ref([])
 const showDownload = ref(false)
 const curRow = ref({})
@@ -66,6 +56,34 @@ const columns = [
                         }
                     },
                     { default: () => t('download') }
+                ),
+                h(NPopconfirm,
+                    {
+                        onPositiveClick: async () => {
+                            try {
+                                await api.fetch(`/api/attachment/delete`, {
+                                    method: 'POST',
+                                    body: JSON.stringify({ key: row.key })
+                                });
+                                message.success(t('deleteSuccess'));
+                                await fetchData();
+                            }
+                            catch (error) {
+                                console.error(error);
+                                message.error(error.message || "error");
+                            }
+                        },
+                    },
+                    {
+                        trigger: () => h(NButton,
+                            {
+                                tertiary: true,
+                                type: "error",
+                            },
+                            { default: () => t('delete') }
+                        ),
+                        default: () => t('deleteConfirm')
+                    }
                 )
             ])
         }
@@ -86,6 +104,6 @@ onMounted(async () => {
                 {{ t('download') }}
             </n-button>
         </n-modal>
-        <n-data-table :columns="columns" :data="data" :bordered="false" />
+        <n-data-table :columns="columns" :data="data" :bordered="false" embedded />
     </div>
 </template>

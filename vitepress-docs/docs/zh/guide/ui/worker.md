@@ -1,54 +1,116 @@
 # Cloudflare workers 后端
 
-1. 点击 `Workers & Pages` -> `Overview` -> `Create Application`
+> [!warning] 注意
+> `worker.dev` 域名在中国无法访问，请自定义域名
+
+1. 点击 `Compute (Workers)` -> `Workers & Pages` -> `Create`
 
     ![create worker](/ui_install/worker_home.png)
 
 2. 选择 `Worker`，点击 `Create Worker`, 修改名称然后点击 `Deploy`
 
     ![worker1](/ui_install/worker-1.png)
+    ![worker2](/ui_install/worker-2.png)
 
-3. 下载 [worker.js](https://github.com/dreamhunter2333/cloudflare_temp_email/releases/latest/download/worker.js)
+3. 回到 `Workers & Pages`，找到刚刚创建的 Worker，点击 `Settings` -> `Runtime`，确认兼容日期。
 
-4. 回到 `Overview`，找到刚刚创建的 worker，点击 `Edit Code`, 删除原来的文件，上传 `worker.js`, 点击 `Deploy`
+    ![worker-runtime](/ui_install/worker-runtime.png)
+
+    > [!NOTE]
+    > 兼容日期为 `2026-08-04` 或更晚时，Cloudflare 默认启用 Node.js 兼容，无需手动添加 `nodejs_compat`。如果现有 Worker 使用更早的兼容日期，请在测试后更新兼容日期，或继续手动添加 `nodejs_compat`；已有配置无需专门删除该标记。
+    >
+    > 较早的兼容日期又没有该标记时，常见错误是 `No such module "path"`、`No such module "node:stream"`，前端也可能只显示 `Network Error`。参见 [Cloudflare Node.js compatibility](https://developers.cloudflare.com/workers/runtime-apis/nodejs/)。
+
+4. 下载 [worker.js](https://github.com/dreamhunter2333/cloudflare_temp_email/releases/latest/download/worker.js)
+
+5. 回到 `Overview`，找到刚刚创建的 worker，点击 `Edit Code`, 删除原来的文件，上传 `worker.js`, 点击 `Deploy`
 
     > [!NOTE]
     > 上传需要先点击左侧菜单的 Explorer,
     > 在文件列表的窗口里点击鼠标右键，在右键菜单里找到 `Upload`,
-    > 请参考下面的截图
+    > 请参考下面的截图。不要在编辑器中手动创建 `\worker.js` 这类带反斜杠的路径；如果保存时报 `No file system handle registered (\worker.js)`，请回到 Explorer 文件列表右键上传根目录的 `worker.js`，然后再点击 `Deploy`。
     >
     > 参考: [issues156](https://github.com/dreamhunter2333/cloudflare_temp_email/issues/156#issuecomment-2079453822)
 
-    ![worker2](/ui_install/worker-2.png)
+    ![worker3](/ui_install/worker-3.png)
+
     ![worker-upload](/ui_install/worker-upload.png)
 
-5. 点击 `Settings` -> `Trggers`, 这里可以添加自己的域名，你也可以使用自动生成的 `*.workers.dev` 的域名。记录下这个域名，后面部署前端会用到。
+6. 点击 `Settings` -> `Variables and Secrets`, 如图所示添加变量
+
+    ![worker-var](/ui_install/worker-var.png)
+
+    > [!NOTE] 注意
+    > 更多变量的配置请查看 [worker变量说明](/zh/guide/worker-vars)
+    >
+    > 注意字符串格式的变量的最外层的引号是不需要的
+    >
+    > 对于 `USER_ROLES` 请配置为此格式 `[{"domains":["awsl.uk","dreamhunter2333.xyz"],"role":"vip","prefix":"vip"},{"domains":["awsl.uk","dreamhunter2333.xyz"],"role":"admin","prefix":""}]`
+
+    建议配置的变量列表
+
+    | 变量名                     | 类型        | 说明                                       | 示例                                 |
+    | -------------------------- | ----------- | ------------------------------------------ | ------------------------------------ |
+    | `PREFIX`                   | 文本        | 新建邮箱名称默认前缀，不需要前缀可不配置   | `tmp`                                |
+    | `DOMAINS`                  | JSON        | 用于临时邮箱的所有域名, 支持多个域名       | `["awsl.uk", "dreamhunter2333.xyz"]` |
+    | `JWT_SECRET`               | 文本/Secret | 用于生成 jwt 的密钥, jwt 用于登录以及鉴权  | `xxx`                                |
+    | `ADMIN_PASSWORDS`          | JSON        | admin 控制台密码, 不配置则不允许访问控制台 | `["123", "456"]`                     |
+    | `ENABLE_USER_CREATE_EMAIL` | 文本/JSON   | 是否允许用户创建邮箱, 不配置则不允许       | `true`                               |
+    | `ENABLE_USER_DELETE_EMAIL` | 文本/JSON   | 是否允许用户删除邮件, 不配置则不允许       | `true`                               |
+
+7. 点击 `Settings` -> `Bindings`, 点击 `Add Binding`, 名称如图，选择刚刚创建的 D1 数据库，点击 `Add Binding`
+
+    > [!NOTE] 重要
+    > 注意此处 `D1 Database` 的绑定名称必须为 `DB`，必须是大写。绑定名写成 `db`、`DATABASE` 或其他值时，`/open_api/settings`、`/admin/*` 等接口会异常，前端常见表现是页面初始化报 `map` 错误或 `Network Error`。
+
+    ![worker-bindings](/ui_install/worker-bindings.png)
+
+    ![worker-d1-1](/ui_install/worker-d1-1.png)
+
+    ![worker-d1-2](/ui_install/worker-d1-2.png)
+
+8. 点击 `Settings` -> `Triggers`, 这里可以添加自己的域名，你也可以使用自动生成的 `*.workers.dev` 的域名。记录下这个域名，后面部署前端会用到。
 
     > [!NOTE]
     > 打开 `worker` 的 `url`，如果显示 `OK` 说明部署成功
     >
     > 打开 `/health_check`，如果显示 `OK` 说明部署成功
+    >
+    > 打开 `/open_api/settings`，如果返回 JSON，说明前端初始化依赖的公开配置接口可用。部署 Pages 前建议先确认这个地址正常。
 
     ![worker3](/ui_install/worker-3.png)
 
-6. 点击 `Settings` -> `Variables`, 如图所示添加变量，参考 [修改 wrangler.toml 配置文件](/zh/guide/cli/worker.html#修改-wrangler-toml-配置文件) 中的 `vars` 部分
+9. 如果你要启用注册用户功能，并需要发送邮件验证，则需要创建 `KV` 缓存, 不需要可跳过此步骤
 
-    ![worker-var](/ui_install/worker-var.png)
-
-7. 点击 `Settings` -> `Variables`, 下拉找到 `D1 Database`, 点击 `Add Binding`, 名称如图，选择刚刚创建的 D1 数据库，点击 `Deploy`
-
-    ![worker-d1](/ui_install/worker-d1.png)
-
-8. 如果你要启用注册用户功能，并需要发送邮件验证，则需要创建 `KV` 缓存, 不需要可跳过此步骤，点击 `Workers & Pages` -> `KV` -> `Create Namespace`, 如图，点击 `Create Namespace`，然后在 `Settings` -> `Variables`, 下拉找到 `KV`, 点击 `Add Binding`, 名称如图，选择刚刚创建的 `KV` 缓存，点击 `Deploy`
-    > [!NOTE]
+    > [!NOTE] 重要
     > 如果你要启用注册用户功能，并需要发送邮件验证，则需要创建 `KV` 缓存, 不需要可跳过此步骤
+    >
+    > 注意此处 `KV` 的绑定名称必须为 `KV`
+
+    点击 `Storage & Databases` -> `KV` -> `Create Namespace`, 如图，点击 `Create Namespace`
 
     ![worker-kv](/ui_install/worker-kv.png)
-    ![worker-kv-bind](/ui_install/worker-kv-bind.png)
 
-9. Telegram Bot 配置
+    ![worker-kv-0](/ui_install/worker-kv-0.png)
+
+    然后点击 `Settings` -> `Bindings`, 点击 `Add Binding`, 名称如图，选择刚刚创建的 KV,点击 `Add Binding`
+
+    ![worker-bindings](/ui_install/worker-bindings.png)
+
+    ![worker-kv-1](/ui_install/worker-kv-1.png)
+
+    ![worker-kv-2](/ui_install/worker-kv-2.png)
+
+10. Telegram Bot 配置
 
     > [!NOTE]
     > 如果不需要 Telegram Bot, 可跳过此步骤
 
-    请先创建一个 Telegram Bot，然后获取 `token`，然后执行下面的命令，将 `token` 添加到 `Variables` 中, Name: `TELEGRAM_BOT_TOKEN`
+    请先创建一个 Telegram Bot，然后获取 `token`，将 `token` 添加到 `Variables and Secrets` 中, 变量名称: `TELEGRAM_BOT_TOKEN`
+
+11. 如果你想要使用 admin 页面中的定时任务清理邮件，需要到 `Settings` -> `Trigger Events` -> `Cron Triggers` 中添加定时任务.
+
+    > [!NOTE]
+    > 选择 `cron` 表达式，输入 `0 0 * * *`（此表达式表示每天午夜运行），点击 `Add` 增加。请根据您的需求调整此表达式。
+    >
+    > 只在 admin 页面开启自动清理配置还不够，必须添加 Cron Trigger 后 Worker 的 `scheduled` 事件才会运行。D1 到达容量上限后会出现 `D1_ERROR: Exceeded maximum DB size`，新邮件无法继续写入，表现为“突然收不到邮件；删除几封后恢复”。

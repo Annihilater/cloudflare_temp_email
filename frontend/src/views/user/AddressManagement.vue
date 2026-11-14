@@ -1,48 +1,51 @@
 <script setup>
-import { ref, h, onMounted } from 'vue';
-import { useI18n } from 'vue-i18n'
+import { ref, h, onMounted, watch } from 'vue';
+import { useScopedI18n } from '@/i18n/app'
 import { useRouter } from 'vue-router';
 import { NBadge, NPopconfirm, NButton } from 'naive-ui'
 
 import { useGlobalState } from '../../store'
 import { api } from '../../api'
 import { getRouterPathWithLang } from '../../utils'
+import AddressCredentialModal from '../../components/AddressCredentialModal.vue'
 
-const { jwt } = useGlobalState()
+import Login from '../common/Login.vue';
+
+const { jwt, openSettings, loading } = useGlobalState()
 const message = useMessage()
 const router = useRouter()
 
-const { locale, t } = useI18n({
-    messages: {
-        en: {
-            success: 'success',
-            name: 'Name',
-            mail_count: 'Mail Count',
-            send_count: 'Send Count',
-            actions: 'Actions',
-            changeMailAddress: 'Change Mail Address',
-            unbindAddress: 'Unbind Address',
-            unbindAddressTip: 'Before unbinding, please switch to this email address and save the email address credential.',
-        },
-        zh: {
-            success: '成功',
-            name: '名称',
-            mail_count: '邮件数量',
-            send_count: '发送数量',
-            actions: '操作',
-            changeMailAddress: '切换邮箱地址',
-            unbindAddress: '解绑地址',
-            unbindAddressTip: '解绑前请切换到此邮箱地址并保存邮箱地址凭证。',
-        }
-    }
-});
+const { locale, t } = useScopedI18n('views.user.AddressManagement')
+const { t: credentialT } = useScopedI18n('components.AddressCredentialModal')
 
 const data = ref([])
+const count = ref(0)
+const page = ref(1)
+const pageSize = ref(20)
+const addressQuery = ref('')
+const activeQuery = ref('')
+const showTranferAddress = ref(false)
+const currentAddress = ref("")
+const currentAddressId = ref(0)
+const targetUserEmail = ref('')
+const showAddressCredential = ref(false)
+const currentAddressCredential = ref('')
+const credentialAddress = ref('')
+
+const showCredential = async (row) => {
+    try {
+        const { jwt: addressCredential } = await api.fetch(`/user_api/bind_address_jwt/${row.id}`)
+        currentAddressCredential.value = addressCredential
+        credentialAddress.value = row.name
+        showAddressCredential.value = true
+    } catch (error) {
+        message.error(error.message || "error")
+    }
+}
 
 const changeMailAddress = async (address_id) => {
     try {
         const res = await api.fetch(`/user_api/bind_address_jwt/${address_id}`);
-        message.success(t('changeMailAddress') + " " + t('success'));
         if (!res.jwt) {
             message.error("jwt not found");
             return;
@@ -63,7 +66,44 @@ const unbindAddress = async (address_id) => {
             body: JSON.stringify({ address_id })
         });
         message.success(t('unbindAddress') + " " + t('success'));
-        await fetchData();
+        if (page.value === 1) {
+            await fetchData();
+        } else {
+            page.value = 1;
+        }
+    } catch (error) {
+        console.log(error)
+        message.error(error.message || "error");
+    }
+}
+
+const transferAddress = async () => {
+    if (!targetUserEmail.value) {
+        message.error("targetUserEmail is required");
+        return;
+    }
+    if (!currentAddressId.value) {
+        message.error("currentAddressId is required");
+        return;
+    }
+    try {
+        const res = await api.fetch(`/user_api/transfer_address`, {
+            method: 'POST',
+            body: JSON.stringify({
+                address_id: currentAddressId.value,
+                target_user_email: targetUserEmail.value
+            })
+        });
+        message.success(t('transferAddress') + " " + t('success'));
+        if (page.value === 1) {
+            await fetchData();
+        } else {
+            page.value = 1;
+        }
+        showTranferAddress.value = false;
+        currentAddressId.value = 0;
+        currentAddress.value = "";
+        targetUserEmail.value = "";
     } catch (error) {
         console.log(error)
         message.error(error.message || "error");
@@ -72,11 +112,16 @@ const unbindAddress = async (address_id) => {
 
 const fetchData = async () => {
     try {
+        const params = new URLSearchParams({
+            limit: String(pageSize.value),
+            offset: String((page.value - 1) * pageSize.value),
+        });
+        if (activeQuery.value) params.set('query', activeQuery.value);
         const { results, count: addressCount } = await api.fetch(
-            `/user_api/bind_address`
+            `/user_api/bind_address?${params.toString()}`
         );
         data.value = results;
-        if (addressCount > 0) {
+        if (page.value === 1) {
             count.value = addressCount;
         }
     } catch (error) {
@@ -85,13 +130,24 @@ const fetchData = async () => {
     }
 }
 
+const searchData = () => {
+    const query = addressQuery.value.trim();
+    if (query.length > 100 || /[%_]/.test(query)) {
+        message.error(t('invalidQuery'));
+        return;
+    }
+    addressQuery.value = query;
+    activeQuery.value = addressQuery.value;
+    if (page.value === 1) {
+        fetchData();
+    } else {
+        page.value = 1;
+    }
+}
+
 const columns = [
     {
-        title: "ID",
-        key: "id"
-    },
-    {
-        title: t('name'),
+        title: t('emailAddress'),
         key: "name"
     },
     {
@@ -123,6 +179,14 @@ const columns = [
         key: 'actions',
         render(row) {
             return h('div', [
+                h(NButton,
+                    {
+                        tertiary: true,
+                        type: "primary",
+                        onClick: () => showCredential(row)
+                    },
+                    { default: () => credentialT(openSettings.value.addressPasswordLoginOnly ? 'sessionToken' : 'addressCredential') }
+                ),
                 h(NPopconfirm,
                     {
                         onPositiveClick: () => changeMailAddress(row.id)
@@ -133,10 +197,22 @@ const columns = [
                                 tertiary: true,
                                 type: "primary",
                             },
-                            { default: () => t('changeMailAddress') }
+                            { default: () => t('openMailbox') }
                         ),
-                        default: () => `${t('changeMailAddress')}?`
+                        default: () => `${t('openMailbox')}?`
                     }
+                ),
+                h(NButton,
+                    {
+                        tertiary: true,
+                        type: "primary",
+                        onClick: () => {
+                            currentAddressId.value = row.id;
+                            currentAddress.value = row.name;
+                            showTranferAddress.value = true;
+                        }
+                    },
+                    { default: () => t('transferAddress') }
                 ),
                 h(NPopconfirm,
                     {
@@ -150,7 +226,7 @@ const columns = [
                             },
                             { default: () => t('unbindAddress') }
                         ),
-                        default: () => t('unbindAddressTip')
+                        default: () => t(openSettings.value.addressPasswordLoginOnly ? 'unbindPasswordTip' : 'unbindAddressTip')
                     }
                 ),
             ])
@@ -161,10 +237,66 @@ const columns = [
 onMounted(async () => {
     await fetchData()
 })
+
+watch([page, pageSize], async () => {
+    await fetchData();
+})
 </script>
 
 <template>
     <div>
-        <n-data-table :columns="columns" :data="data" :bordered="false" />
+        <AddressCredentialModal v-model:show="showAddressCredential" :address="credentialAddress"
+            :jwt="currentAddressCredential" />
+        <n-modal v-model:show="showTranferAddress" preset="dialog" :title="t('transferAddress')">
+            <span>
+                <p>{{ t("transferAddressTip") }}</p>
+                <p>{{ t('transferAddress') + ": " + currentAddress }}</p>
+                <n-input v-model:value="targetUserEmail" :placeholder="t('targetUserEmail')" />
+            </span>
+            <template #action>
+                <n-button :loading="loading" @click="transferAddress" size="small" tertiary type="error">
+                    {{ t('transferAddress') }}
+                </n-button>
+            </template>
+        </n-modal>
+        <n-tabs type="segment">
+            <n-tab-pane name="address" :tab="t('address')">
+                <n-input-group style="margin-top: 10px;">
+                    <n-input v-model:value="addressQuery" data-testid="user-address-search" clearable :placeholder="t('addressQueryTip')"
+                        @keydown.enter="searchData" />
+                    <n-button @click="searchData" type="primary" tertiary>
+                        {{ t('query') }}
+                    </n-button>
+                </n-input-group>
+                <div class="address-table-scroll">
+                    <n-pagination v-model:page="page" v-model:page-size="pageSize" :item-count="count"
+                        :page-sizes="[20, 50, 100]" show-size-picker>
+                        <template #prefix="{ itemCount }">
+                            {{ t('itemCount') }}: {{ itemCount }}
+                        </template>
+                    </n-pagination>
+                    <n-data-table :columns="columns" :data="data" :bordered="false" embedded />
+                </div>
+            </n-tab-pane>
+            <n-tab-pane name="create_or_bind" :tab="t('create_or_bind')">
+                <Login />
+            </n-tab-pane>
+        </n-tabs>
     </div>
 </template>
+
+<style scoped>
+.n-data-table {
+    min-width: 640px;
+}
+
+.address-table-scroll {
+    max-width: 100%;
+    overflow-x: auto;
+}
+
+.n-pagination {
+    margin-top: 10px;
+    margin-bottom: 10px;
+}
+</style>

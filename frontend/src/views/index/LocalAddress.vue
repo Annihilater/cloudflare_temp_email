@@ -1,42 +1,21 @@
 <script setup lang="ts">
 import { ref, h, computed } from 'vue';
 import { useLocalStorage } from '@vueuse/core';
-import { useI18n } from 'vue-i18n'
-import { NPopconfirm, NButton } from 'naive-ui'
+import { useScopedI18n } from '@/i18n/app'
+import { NPopconfirm, NButton, NTag } from 'naive-ui'
+import { decodeAddressToken } from '../../utils/local-address-cache'
 
 // @ts-ignore
 import { useGlobalState } from '../../store'
 // @ts-ignore
 import Login from '../common/Login.vue';
 
-const { jwt } = useGlobalState()
+const { jwt, openSettings } = useGlobalState()
 // @ts-ignore
 const message = useMessage()
 
-const { t } = useI18n({
-    messages: {
-        en: {
-            tip: 'These addresses are stored in your browser, maybe loss if you clear the browser cache.',
-            success: 'success',
-            address: 'Address',
-            actions: 'Actions',
-            changeMailAddress: 'Change Mail Address',
-            unbindMailAddress: 'Unbind Mail Address credential',
-            bind: 'Bind',
-            bindAddressSuccess: 'Bind Address Success',
-        },
-        zh: {
-            tip: '这些地址存储在您的浏览器中，如果您清除浏览器缓存，可能会丢失。',
-            success: '成功',
-            address: '地址',
-            actions: '操作',
-            changeMailAddress: '切换邮箱地址',
-            unbindMailAddress: '解绑邮箱地址',
-            bind: '绑定',
-            bindAddressSuccess: '绑定地址成功',
-        }
-    }
-});
+const { t } = useScopedI18n('views.index.LocalAddress')
+const { t: loginT } = useScopedI18n('views.common.Login')
 
 const tabValue = ref('address')
 const localAddressCache = useLocalStorage("LocalAddressCache", []);
@@ -47,28 +26,15 @@ const data = computed(() => {
         localAddressCache.value.push(jwt.value)
     }
     return localAddressCache.value.map((curJwt: string) => {
-        try {
-            var payload = JSON.parse(
-                decodeURIComponent(
-                    atob(curJwt.split(".")[1]
-                        .replace(/-/g, "+").replace(/_/g, "/")
-                    )
-                )
-            );
-            return {
-                valid: true,
-                address: payload.address,
-                jwt: curJwt
-            }
-        } catch (e) {
-            return {
-                valid: false,
-                address: `invalid jwt [${curJwt}]`,
-                jwt: curJwt
-            }
+        const payload = decodeAddressToken(curJwt);
+        if (!payload) return { valid: false, address: `invalid jwt [${curJwt}]`, jwt: curJwt };
+        return {
+            valid: true,
+            address: payload.address,
+            loginMethod: payload.type === 'address_password_login' ? 'passwordLogin' : 'credentialLogin',
+            jwt: curJwt
         }
     })
-
 })
 
 const bindAddress = async () => {
@@ -91,11 +57,18 @@ const columns = [
         key: "address"
     },
     {
+        title: t('loginMethod'),
+        key: 'loginMethod',
+        render: (row: any) => row.loginMethod
+            ? h(NTag, { size: 'small', bordered: false }, () => loginT(row.loginMethod))
+            : null,
+    },
+    {
         title: t('actions'),
         key: 'actions',
         render(row: any) {
             return h('div', [
-                h(NPopconfirm,
+                (!openSettings.value.addressPasswordLoginOnly || row.loginMethod === 'passwordLogin') ? h(NPopconfirm,
                     {
                         onPositiveClick: () => {
                             jwt.value = row.jwt
@@ -112,7 +85,7 @@ const columns = [
                         ),
                         default: () => `${t('changeMailAddress')}?`
                     }
-                ),
+                ) : null,
                 h(NPopconfirm,
                     {
                         onPositiveClick: () => {
@@ -140,20 +113,37 @@ const columns = [
         }
     }
 ]
+const visibleColumns = computed(() => {
+    const methods = new Set(data.value.filter(row => row.valid).map(row => row.loginMethod));
+    return methods.size > 1 ? columns : columns.filter(column => column.key !== 'loginMethod');
+})
 </script>
 
 <template>
     <div>
-        <n-alert type="warning" :show-icon="false">
+        <n-alert type="warning" :show-icon="false" :bordered="false">
             <span>{{ t('tip') }}</span>
         </n-alert>
         <n-tabs type="segment" v-model:value="tabValue">
             <n-tab-pane name="address" :tab="t('address')">
-                <n-data-table :columns="columns" :data="data" :bordered="false" />
+                <div class="address-table-scroll">
+                    <n-data-table :columns="visibleColumns" :data="data" :bordered="false" embedded />
+                </div>
             </n-tab-pane>
-            <n-tab-pane name="bind" :tab="t('bind')">
+            <n-tab-pane name="create_or_bind" :tab="t('create_or_bind')">
                 <Login :bindUserAddress="bindAddress" />
             </n-tab-pane>
         </n-tabs>
     </div>
 </template>
+
+<style scoped>
+.n-data-table {
+    min-width: 640px;
+}
+
+.address-table-scroll {
+    max-width: 100%;
+    overflow-x: auto;
+}
+</style>

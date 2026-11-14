@@ -1,47 +1,15 @@
 <script setup>
 import { ref, h, onMounted, watch } from 'vue';
-import { useI18n } from 'vue-i18n'
+import { useScopedI18n } from '@/i18n/app'
 
 import { useGlobalState } from '../../store'
 import { api } from '../../api'
+import { utcToLocalDate } from '../../utils';
 
-const { loading } = useGlobalState()
+const { loading, useUTCDate } = useGlobalState()
 const message = useMessage()
 
-const { t } = useI18n({
-  messages: {
-    en: {
-      address: 'Address',
-      success: 'Success',
-      is_enabled: 'Is Enabled',
-      enable: 'Enable',
-      disable: 'Disable',
-      modify: 'Modify',
-      created_at: 'Created At',
-      action: 'Action',
-      itemCount: 'itemCount',
-      modalTip: 'Please input the sender balance',
-      balance: 'Balance',
-      query: 'Query',
-      ok: 'OK'
-    },
-    zh: {
-      address: '地址',
-      success: '成功',
-      is_enabled: '是否启用',
-      enable: '启用',
-      disable: '禁用',
-      modify: '修改',
-      created_at: '创建时间',
-      action: '操作',
-      itemCount: '总数',
-      modalTip: '请输入发件额度',
-      balance: '余额',
-      query: '查询',
-      ok: '确定'
-    }
-  }
-});
+const { t } = useScopedI18n('views.admin.SenderAccess')
 const data = ref([])
 const count = ref(0)
 const page = ref(1)
@@ -75,6 +43,7 @@ const updateData = async () => {
 
 const fetchData = async () => {
   try {
+    addressQuery.value = addressQuery.value.trim();
     const { results, count: addressCount } = await api.fetch(
       `/admin/address_sender`
       + `?limit=${pageSize.value}`
@@ -102,7 +71,10 @@ const columns = [
   },
   {
     title: t('created_at'),
-    key: "created_at"
+    key: "created_at",
+    render(row) {
+      return utcToLocalDate(row.created_at, useUTCDate.value);
+    }
   },
   {
     title: t('balance'),
@@ -134,7 +106,25 @@ const columns = [
             }
           },
           { default: () => t('modify') }
-        )
+        ),
+        h(NPopconfirm,
+          {
+            onPositiveClick: async () => {
+              await api.fetch(`/admin/address_sender/${row.id}`, { method: 'DELETE' });
+              await fetchData();
+            }
+          },
+          {
+            trigger: () => h(NButton,
+              {
+                tertiary: true,
+                type: "error",
+              },
+              { default: () => t('delete') }
+            ),
+            default: () => t('deleteTip')
+          }
+        ),
       ])
     }
   }
@@ -170,20 +160,22 @@ onMounted(async () => {
       </template>
     </n-modal>
     <n-input-group>
-      <n-input v-model:value="addressQuery" />
+      <n-input v-model:value="addressQuery" @keydown.enter="fetchData" />
       <n-button @click="fetchData" type="primary" tertiary>
         {{ t('query') }}
       </n-button>
     </n-input-group>
-    <div style="display: inline-block;">
-      <n-pagination v-model:page="page" v-model:page-size="pageSize" :item-count="count" :page-sizes="[20, 50, 100]"
-        show-size-picker>
-        <template #prefix="{ itemCount }">
-          {{ t('itemCount') }}: {{ itemCount }}
-        </template>
-      </n-pagination>
+    <div style="overflow: auto;">
+      <div style="display: inline-block;">
+        <n-pagination v-model:page="page" v-model:page-size="pageSize" :item-count="count" :page-sizes="[20, 50, 100]"
+          show-size-picker>
+          <template #prefix="{ itemCount }">
+            {{ t('itemCount') }}: {{ itemCount }}
+          </template>
+        </n-pagination>
+      </div>
+      <n-data-table :columns="columns" :data="data" :bordered="false" embedded />
     </div>
-    <n-data-table :columns="columns" :data="data" :bordered="false" />
   </div>
 </template>
 
@@ -191,5 +183,9 @@ onMounted(async () => {
 .n-pagination {
   margin-top: 10px;
   margin-bottom: 10px;
+}
+
+.n-data-table {
+  min-width: 700px;
 }
 </style>

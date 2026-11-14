@@ -1,19 +1,11 @@
 <script setup>
-import { useI18n } from 'vue-i18n'
+import { useScopedI18n } from '@/i18n/app'
 import { useGlobalState } from '../store'
+import DOMPurify from 'dompurify'
 const { openSettings } = useGlobalState()
 
 
-const { t } = useI18n({
-    messages: {
-        en: {
-            copyright: "Copyright"
-        },
-        zh: {
-            copyright: "版权所有"
-        }
-    }
-});
+const { t } = useScopedI18n('views.Footer')
 
 </script>
 
@@ -21,9 +13,14 @@ const { t } = useI18n({
     <div>
         <n-divider class="footer-divider" />
         <div style="text-align: center; padding: 20px">
-            <n-text depth="3">
-                {{ t('copyright') }} © 2023-{{ new Date().getFullYear() }} {{ openSettings.copyright }}
-            </n-text>
+            <n-space justify="center">
+                <n-text depth="3">
+                    {{ t('copyright') }} © 2023-{{ new Date().getFullYear() }}
+                </n-text>
+                <n-text depth="3">
+                    <div v-html="DOMPurify.sanitize(openSettings.copyright)"></div>
+                </n-text>
+            </n-space>
         </div>
     </div>
 </template>

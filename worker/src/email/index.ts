@@ -1,62 +1,140 @@
 import { Context } from "hono";
 
-import { getEnvStringList } from "../utils";
+import { getJsonSetting, normalizeAddressDomain } from "../utils";
 import { sendMailToTelegram } from "../telegram_api";
-import { Bindings, HonoCustomType } from "../types";
 import { auto_reply } from "./auto_reply";
-import { trigerWebhook } from "../mails_api/webhook_settings";
+import { isBlocked } from "./black_list";
+import { triggerWebhook, triggerAnotherWorker, commonParseMail } from "../common";
+import { check_if_junk_mail } from "./check_junk";
+import { remove_attachment_if_need } from "./check_attachment";
+import { extractEmailInfo } from "./ai_extract";
+import { forwardEmail } from "./forward";
+import { EmailRuleSettings } from "../models";
+import { CONSTANTS } from "../constants";
+import { deleteRawMail, storeRawMail } from "./storage";
 
 
-async function email(message: ForwardableEmailMessage, env: Bindings, ctx: ExecutionContext) {
-    if (env.BLACK_LIST && env.BLACK_LIST.split(",").some(word => message.from.includes(word))) {
-        message.setReject("Missing from address");
-        console.log(`Reject message from ${message.from} to ${message.to}`);
+async function receiveEmail(
+    message: ForwardableEmailMessage, env: Bindings, ctx: ExecutionContext,
+    allowForward: boolean = true, onStored?: () => void
+): Promise<void> {
+    const toAddress = normalizeAddressDomain(message.to);
+    if (await isBlocked(message, env)) {
+        message.setReject("Reject from address");
+        console.log(`Reject message from ${message.from} to ${toAddress}`);
         return;
     }
     const rawEmail = await new Response(message.raw).text();
-    const message_id = message.headers.get("Message-ID");
-    // save email
-    const { success } = await env.DB.prepare(
-        `INSERT INTO raw_mails (source, address, raw, message_id) VALUES (?, ?, ?, ?)`
-    ).bind(
-        message.from, message.to, rawEmail, message_id
-    ).run();
-    if (!success) {
-        message.setReject(`Failed save message to ${message.to}`);
-        console.log(`Failed save message from ${message.from} to ${message.to}`);
-    }
+    const parsedEmailContext: ParsedEmailContext = {
+        rawEmail: rawEmail
+    };
 
-    // forward email
+    // check if junk mail
     try {
-        const forwardAddressList = getEnvStringList(env.FORWARD_ADDRESS_LIST)
-        for (const forwardAddress of forwardAddressList) {
-            await message.forward(forwardAddress);
+        const is_junk = await check_if_junk_mail(env, toAddress, parsedEmailContext, message.headers.get("Message-ID"));
+        if (is_junk) {
+            message.setReject("Junk mail");
+            console.log(`Junk mail from ${message.from} to ${toAddress}`);
+            return;
         }
     } catch (error) {
-        console.log("forward email error", error);
+        console.error("check junk mail error", error);
     }
+
+    // check if unknown address mail
+    try {
+        const emailRuleSettings = await getJsonSetting<EmailRuleSettings>(
+            { env: env } as Context<HonoCustomType>, CONSTANTS.EMAIL_RULE_SETTINGS_KEY
+        );
+        if (emailRuleSettings?.blockReceiveUnknowAddressEmail) {
+            const db_address_id = await env.DB.prepare(
+                `SELECT id FROM address where name = ? `
+            ).bind(toAddress).first("id");
+            if (!db_address_id) {
+                message.setReject("Unknown address");
+                console.log(`Unknown address mail from ${message.from} to ${toAddress}`);
+                return;
+            }
+        }
+    } catch (error) {
+        console.error("check unknown address mail error", error);
+    }
+
+    // remove attachment if configured or size > 2MB
+    try {
+        await remove_attachment_if_need(env, parsedEmailContext, message.from, toAddress, message.rawSize);
+    } catch (error) {
+        console.error("remove attachment error", error);
+    }
+
+    const message_id = message.headers.get("Message-ID");
+    // save email
+    const storedMailId = await storeRawMail(
+        env, message.from, toAddress, message_id, parsedEmailContext.rawEmail
+    ).then(({ success, meta }) => {
+        if (!success) {
+            message.setReject(`Failed save message to ${toAddress}`);
+            console.error(`Failed save message from ${message.from} to ${toAddress}`);
+        }
+        return success ? meta.last_row_id : undefined;
+    }).catch((error) => {
+        console.error("save email error", error);
+        return undefined;
+    });
+    if (storedMailId) onStored?.();
+
+    // forward email
+    const { deleteOriginal: deleteAfterForward } = allowForward
+        ? await forwardEmail(message, env, rawEmail,
+            (targetMessage, onTargetStored) => receiveEmail(targetMessage, env, ctx, false, onTargetStored))
+        : { deleteOriginal: false };
+
+    // AI email content extraction
+    const aiExtractResult = await extractEmailInfo(parsedEmailContext, env, storedMailId, toAddress);
 
     // send email to telegram
     try {
         await sendMailToTelegram(
             { env: env } as Context<HonoCustomType>,
-            message.to, rawEmail, message_id);
+            toAddress, parsedEmailContext, storedMailId, aiExtractResult);
     } catch (error) {
-        console.log("send mail to telegram error", error);
+        console.error("send mail to telegram error", error);
     }
 
     // send webhook
     try {
-        await trigerWebhook(
+        await triggerWebhook(
             { env: env } as Context<HonoCustomType>,
-            message.to, rawEmail
+            toAddress, parsedEmailContext, storedMailId, aiExtractResult
         );
     } catch (error) {
-        console.log("send webhook error", error);
+        console.error("send webhook error", error);
+    }
+
+    // trigger another worker
+    try {
+        const parsedEmail = (await commonParseMail(parsedEmailContext));
+        const parsedText = parsedEmail?.text ?? ""
+        const rpcEmail: RPCEmailMessage = {
+            from: message.from,
+            to: toAddress,
+            rawEmail: rawEmail,
+            headers: message.headers
+        }
+        await triggerAnotherWorker({ env: env } as Context<HonoCustomType>, rpcEmail, parsedText);
+    } catch (error) {
+        console.error("trigger another worker error", error);
     }
 
     // auto reply email
-    await auto_reply(message, env);
+    if (allowForward) await auto_reply(message, env, toAddress);
+
+    const shouldDeleteMail = deleteAfterForward;
+    if (shouldDeleteMail && storedMailId) await deleteRawMail(env, storedMailId, toAddress);
+}
+
+async function email(message: ForwardableEmailMessage, env: Bindings, ctx: ExecutionContext): Promise<void> {
+    await receiveEmail(message, env, ctx);
 }
 
 export { email }

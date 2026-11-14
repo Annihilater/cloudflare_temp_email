@@ -1,4 +1,7 @@
-# Cloudflare workers 后端
+# Cloudflare Worker 后端
+
+> [!warning] 注意
+> `worker.dev` 域名在中国无法访问，请自定义域名
 
 ## 初始化项目
 
@@ -22,15 +25,27 @@ wrangler kv:namespace create DEV
 
 ## 修改 `wrangler.toml` 配置文件
 
+> [!NOTE] 注意
+> 更多变量的配置请查看 [worker变量说明](/zh/guide/worker-vars)
+
 ```toml
 name = "cloudflare_temp_email"
 main = "src/worker.ts"
-compatibility_date = "2023-12-01"
+compatibility_date = "2024-09-23"
+compatibility_flags = [ "nodejs_compat" ]
+
 # 如果你想使用自定义域名，你需要添加 routes 配置
+# 将 pattern 替换为你自己的域名，该域名需要已添加到你的 Cloudflare 账户中
+# 配置后 Worker 将通过该自定义域名提供服务，而非默认的 *.workers.dev 域名
 # routes = [
 #  { pattern = "temp-email-api.xxxxx.xyz", custom_domain = true },
 # ]
-node_compat = true
+
+# 如果你想要部署带有前端资源的 worker, 你需要添加 assets 配置
+# [assets]
+# directory = "../frontend/dist/"
+# binding = "ASSETS"
+# run_worker_first = true
 
 # 如果你想要使用定时任务清理邮件，取消下面的注释，并修改 cron 表达式
 # [triggers]
@@ -42,42 +57,23 @@ node_compat = true
 # ]
 
 [vars]
-# TITLE = "Custom Title" # 自定义网站标题
-PREFIX = "tmp" # 要处理的邮箱名称前缀，不需要后缀可配置为空字符串
-# (min, max) adderss的长度，如果不设置，默认为(1, 30)
-# MIN_ADDRESS_LEN = 1
-# MAX_ADDRESS_LEN = 30
-# 如果你想要你的网站私有，取消下面的注释，并修改密码
-# PASSWORDS = ["123", "456"]
+# 邮箱名称前缀，不需要后缀可配置为空字符串或者不配置
+PREFIX = "tmp"
+# 用于临时邮箱的所有域名, 支持多个域名
+DOMAINS = ["xxx.xxx1" , "xxx.xxx2"]
+# 用于签名 JWT 的密钥，JWT 用于登录鉴权
+# 请使用随机字符串，例如通过 openssl rand -hex 32 生成
+JWT_SECRET = "xxx"
+
 # admin 控制台密码, 不配置则不允许访问控制台
 # ADMIN_PASSWORDS = ["123", "456"]
-# admin 联系方式，不配置则不显示，可配置任意字符串
-# ADMIN_CONTACT = "xx@xx.xxx"
-DOMAINS = ["xxx.xxx1" , "xxx.xxx2"] # 你的域名, 支持多个域名
-JWT_SECRET = "xxx" # 用于生成 jwt 的密钥, jwt 用于给用户登录以及鉴权
-BLACK_LIST = "" # 黑名单，用于过滤发件人，逗号分隔
+# Admin API IP 白名单，同时限制管理员密码和 Admin 用户令牌访问
+# ADMIN_API_IP_WHITELIST = ["203.0.113.10"]
+
 # 是否允许用户创建邮件, 不配置则不允许
 ENABLE_USER_CREATE_EMAIL = true
 # 允许用户删除邮件, 不配置则不允许
 ENABLE_USER_DELETE_EMAIL = true
-# 允许自动回复邮件
-ENABLE_AUTO_REPLY = false
-# 是否启用 webhook
-# ENABLE_WEBHOOK = true
-# 前端界面页脚文本
-# COPYRIGHT = "Dream Hunter"
-# 默认发送邮件余额，如果不设置，将为 0
-# DEFAULT_SEND_BALANCE = 1
-# Turnstile 人机验证配置
-# CF_TURNSTILE_SITE_KEY = ""
-# CF_TURNSTILE_SECRET_KEY = ""
-# dkim config
-# DKIM_SELECTOR = "mailchannels" # 参考 DKIM 部分 mailchannels._domainkey 的 mailchannels
-# DKIM_PRIVATE_KEY = "" # 参考 DKIM 部分 priv_key.txt 的内容
-# telegram bot 最多绑定邮箱数量
-# TG_MAX_ACCOUNTS = 5
-# 全局转发地址列表，如果不配置则不启用，启用后所有邮件都会转发到列表中的地址
-# FORWARD_ADDRESS_LIST = ["xxx@xxx.com"]
 
 # D1 数据库的名称和 ID 可以在 cloudflare 控制台查看
 [[d1_databases]]
@@ -97,6 +93,41 @@ database_id = "xxx" # D1 数据库 ID
 # namespace_id = "1001"
 # # 10 requests per minute
 # simple = { limit = 10, period = 60 }
+
+# 绑定其他 worker 处理邮件，例如通过 auth-inbox ai 能力解析验证码或激活链接
+# [[services]]
+# binding = "AUTH_INBOX"
+# service = "auth-inbox"
+```
+
+> [!NOTE]
+> 如果不想把密码写在 `wrangler.toml` 中，`ADMIN_PASSWORDS` 和 `PASSWORDS` 也可以配置为 secret。secret 的值总是字符串，所以需要输入 JSON 数组，例如 `["my-password"]`。直接输入 `my-password` 会解析失败并被当作空列表，导致 admin 控制台无法访问，或网站不再需要密码即可访问。
+>
+> ```bash
+> pnpm wrangler secret put ADMIN_PASSWORDS
+> ```
+
+## 部署带有前端页面的 worker(可选)
+
+> [!NOTE]
+> 如果不需要 [带有前端页面的 worker]，可以跳过此步骤
+> 参考之后部署前端文档，可以进行前后端分离部署
+
+确认已构建前端资源到 `frontend/dist` 目录
+
+```bash
+cd frontend
+pnpm install --no-frozen-lockfile
+pnpm build:pages
+```
+
+`worker` 目录下的 `wrangler.toml` 文件中添加下面的配置
+
+```toml
+[assets]
+directory = "../frontend/dist/"
+binding = "ASSETS"
+run_worker_first = true
 ```
 
 ## Telegram Bot 配置

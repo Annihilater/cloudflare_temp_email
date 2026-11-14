@@ -1,0 +1,23 @@
+{
+  "name": "cloudflare-temp-email-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:unit": "node --experimental-strip-types --test unit/tests/*.test.mjs",
+    "test": "docker compose --profile \"*\" build && docker compose --profile \"*\" run --rm --no-deps frontend pnpm test && docker compose --profile \"*\" up --no-build --abort-on-container-exit --exit-code-from e2e-runner",
+    "test:down": "docker compose --profile \"*\" down -v"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@types/ws": "^8.18.2",
+    "csv-parse": "^7.0.3",
+    "hono": "^4.13.13",
+    "mimetext": "^3.0.28",
+    "postal-mime": "^4.1.4",
+    "ws": "^8.22.0"
+  },
+  "dependencies": {
+    "imapflow": "^2.8.0",
+    "nodemailer": "^10.2.0"
+  }
+}
